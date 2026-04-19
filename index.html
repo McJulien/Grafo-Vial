@@ -1,0 +1,269 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <title>Analizador de Grafos Profesional - Vialidad</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/cytoscape/3.21.1/cytoscape.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+    <script src="https://unpkg.com/layout-base/layout-base.js"></script>
+    <script src="https://unpkg.com/cose-base/cose-base.js"></script>
+    <script src="https://unpkg.com/cytoscape-fcose/cytoscape-fcose.js"></script>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <style>
+        body { font-family: 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; background-color: #f8f9fa; }
+        #cy { width: 100%; height: 750px; background: #fff; border-radius: 12px; border: 1px solid #dee2e6; }
+        .sidebar { height: 750px; overflow-y: auto; }
+        .highlighted { line-color: #ff4757 !important; target-arrow-color: #ff4757 !important; width: 6px !important; z-index: 999; }
+        .result-box { background: #f1f3f5; border-radius: 8px; padding: 12px; border-left: 5px solid #0d6efd; min-height: 60px; }
+        .card { border: none; border-radius: 12px; }
+        .fw-bold-blue { color: #0d6efd; font-weight: 700; text-transform: uppercase; font-size: 0.85rem; letter-spacing: 1px; }
+    </style>
+</head>
+<body>
+
+<div class="container-fluid py-3">
+    <div class="row g-3">
+        <div class="col-md-4 col-lg-3 sidebar">
+            <div class="card p-3 shadow-sm mb-3">
+                <h6 class="fw-bold-blue mb-3">1. Carga de Datos</h6>
+                <input type="file" id="uploadExcel" class="form-control form-control-sm mb-2">
+                <select id="sheetSelector" class="form-select form-select-sm" disabled>
+                    <option>Subir archivo Excel...</option>
+                </select>
+            </div>
+
+            <div class="card p-3 shadow-sm mb-3">
+                <h6 class="fw-bold-blue mb-3">2. Cálculo de Rutas</h6>
+                <div class="mb-2">
+                    <label class="small text-muted">Origen:</label>
+                    <input type="text" id="origen" class="form-control form-control-sm" placeholder="Ej: Monteria">
+                </div>
+                <div class="mb-3">
+                    <label class="small text-muted">Destino:</label>
+                    <input type="text" id="destino" class="form-control form-control-sm" placeholder="Ej: Medellin">
+                </div>
+                <div class="d-flex gap-2">
+                    <button id="btnRuta" class="btn btn-primary btn-sm w-100">Calcular</button>
+                    <button id="btnReset" class="btn btn-outline-secondary btn-sm w-100">Limpiar</button>
+                </div>
+                
+                <div class="mt-4">
+                    <h6 class="fw-bold-blue mb-2">Detalles del Camino</h6>
+                    <div id="routeResult" class="result-box small">Esperando selección...</div>
+                </div>
+            </div>
+
+            <div id="stats" class="card p-3 shadow-sm">
+                <h6 class="fw-bold-blue mb-3">Métricas y Adyacencias</h6>
+                <div id="metricsContent" class="overflow-auto" style="max-height: 300px;"></div>
+            </div>
+        </div>
+
+        <div class="col-md-8 col-lg-9">
+            <div id="cy" class="shadow-sm"></div>
+        </div>
+    </div>
+</div>
+
+<script>
+let cy;
+let workbookData = {};
+
+const normalizar = (str) => str.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().trim();
+
+// --- LECTOR EXCEL ---
+document.getElementById('uploadExcel').addEventListener('change', function(e) {
+    const file = e.target.files[0];
+    const reader = new FileReader();
+    reader.onload = (event) => {
+        const data = new Uint8Array(event.target.result);
+        const workbook = XLSX.read(data, { type: 'array' });
+        const selector = document.getElementById('sheetSelector');
+        selector.innerHTML = '';
+        workbookData = {};
+
+        workbook.SheetNames.forEach(name => {
+            const json = XLSX.utils.sheet_to_json(workbook.Sheets[name]);
+            workbookData[name] = transformData(json);
+            const opt = document.createElement('option');
+            opt.value = name; opt.textContent = name;
+            selector.appendChild(opt);
+        });
+        selector.disabled = false;
+        renderGraph(workbook.SheetNames[0]);
+    };
+    reader.readAsArrayBuffer(file);
+});
+
+function transformData(json) {
+    const elements = [];
+    const nodes = new Set();
+    json.forEach(row => {
+        if (row.Origen && row.Destino) {
+            nodes.add(row.Origen); nodes.add(row.Destino);
+            elements.push({ 
+                data: { 
+                    source: row.Origen, 
+                    target: row.Destino, 
+                    weight: row.Peso,
+                    label: row.Peso + " km" // Añade "km" al texto de la arista
+                } 
+            });
+        }
+    });
+    nodes.forEach(id => elements.push({ data: { id } }));
+    return elements;
+}
+
+// --- RENDERIZADO ---
+function renderGraph(sheetName) {
+    const layoutConfig = {
+        name: 'fcose',
+        quality: 'proof',
+        animate: true,
+        animationDuration: 1000,
+        fit: true,
+        padding: 60,
+        // Configuración de física elástica
+        nodeRepulsion: 10000,
+        idealEdgeLength: 150,
+        edgeElasticity: 0.45, 
+        nodeSeparation: 150,
+        gravity: -15,
+        numIter: 2500,
+        initialTemp: 1000,
+        coolingFactor: 0.99
+    };
+
+    cy = cytoscape({
+        container: document.getElementById('cy'),
+        elements: workbookData[sheetName],
+        minZoom: 0.3,
+        maxZoom: 2.5,
+        style: [
+            {
+                selector: 'node',
+                style: {
+                    'label': 'data(id)',
+                    'background-color': '#0d6efd', // Azul inicial
+                    'color': '#212529',
+                    'font-size': '12px',
+                    'text-valign': 'bottom',
+                    'text-margin-y': '8px',
+                    'width': 22, 
+                    'height': 22,
+                    'text-background-opacity': 0.9,
+                    'text-background-color': '#ffffff',
+                    'text-background-shape': 'roundrectangle',
+                    'text-background-padding': '2px',
+                    'font-weight': '600'
+                }
+            },
+            {
+                selector: 'edge',
+                style: {
+                    'label': 'data(label)',
+                    'width': 2.5,
+                    'line-color': '#adb5bd',
+                    'curve-style': 'bezier',
+                    'font-size': '10px',
+                    'color': '#495057',
+                    'text-background-opacity': 1,
+                    'text-background-color': '#ffffff', // Fondo blanco para legibilidad
+                    'text-background-padding': '2px',
+                    'edge-text-rotation': 'autorotate',
+                    'text-margin-y': -5,
+                    'source-arrow-shape': 'none',
+                    'target-arrow-shape': 'none'
+                }
+            },
+            {
+                selector: '.highlighted',
+                style: { 
+                    'line-color': '#ff4757', 
+                    'background-color': '#ff4757', 
+                    'width': 6,
+                    'color': '#ff4757',
+                    'font-weight': 'bold',
+                    'z-index': 999
+                }
+            }
+        ],
+        layout: layoutConfig
+    });
+
+    // --- INTERACCIÓN ELÁSTICA ---
+    let runningLayout;
+
+    cy.on('grab', 'node', () => {
+        if (runningLayout) runningLayout.stop();
+        runningLayout = cy.layout({
+            ...layoutConfig,
+            fit: false,
+            randomize: false,
+            infinite: true, // Física constante mientras arrastras
+            initialTemp: 500
+        });
+        runningLayout.run();
+    });
+
+    cy.on('free', 'node', () => {
+        if (runningLayout) runningLayout.stop();
+        cy.layout({
+            ...layoutConfig,
+            fit: false,
+            randomize: false,
+            numIter: 500,
+            initialTemp: 100
+        }).run();
+    });
+
+    updateMetrics();
+}
+
+function updateMetrics() {
+    let html = `<table class="table table-hover table-sm" style="font-size:11px">
+                <thead class="table-light"><tr><th>Nodo</th><th>G°</th><th>Vecinos</th></tr></thead><tbody>`;
+    cy.nodes().forEach(n => {
+        const ady = n.neighborhood('node').map(node => node.id()).sort().join(', ');
+        html += `<tr><td class="fw-bold">${n.id()}</td><td>${n.degree()}</td><td>${ady || '-'}</td></tr>`;
+    });
+    document.getElementById('metricsContent').innerHTML = html + "</tbody></table>";
+}
+
+// --- BOTONES ---
+document.getElementById('btnRuta').onclick = () => {
+    const rawOrigen = document.getElementById('origen').value;
+    const rawDestino = document.getElementById('destino').value;
+    
+    const startNode = cy.nodes().filter(n => normalizar(n.id()) === normalizar(rawOrigen))[0];
+    const endNode = cy.nodes().filter(n => normalizar(n.id()) === normalizar(rawDestino))[0];
+
+    if (startNode && endNode) {
+        cy.elements().removeClass('highlighted');
+        const dijkstra = cy.elements().dijkstra(startNode, e => e.data('weight'));
+        const path = dijkstra.pathTo(endNode);
+        const dist = dijkstra.distanceTo(endNode);
+        
+        path.addClass('highlighted');
+        document.getElementById('routeResult').innerHTML = `
+            Ruta: <b class="text-primary">${startNode.id()} ➔ ${endNode.id()}</b><br>
+            Distancia: <b class="text-dark">${dist.toLocaleString()} km</b><br>
+            Escalas: <b>${path.nodes().length - 2} municipios</b>
+        `;
+    } else {
+        document.getElementById('routeResult').innerHTML = `<span class="text-danger">Verifica los nombres (municipios no encontrados).</span>`;
+    }
+};
+
+document.getElementById('btnReset').onclick = () => {
+    cy.elements().removeClass('highlighted');
+    document.getElementById('origen').value = '';
+    document.getElementById('destino').value = '';
+    document.getElementById('routeResult').innerHTML = 'Esperando selección...';
+};
+
+document.getElementById('sheetSelector').onchange = (e) => renderGraph(e.target.value);
+</script>
+</body>
+</html>
